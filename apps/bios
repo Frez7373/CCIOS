@@ -1,366 +1,451 @@
 -- ============================================================
 -- CCI BIOS SETUP UTILITY
--- Compact, BIOS-like firmware interface for CC:Tweaked
--- Standalone: no external APIs or libraries.
+-- Clean classic BIOS-style interface for CC:Tweaked
+-- Standalone. No external libraries or APIs.
 -- ============================================================
 
-local BIOS_VERSION = "2.1.0"
-local CFG = "/.cci_bios.cfg"
-
-local bootCandidates = {
-    {path="/startup",       name="CC:Tweaked startup"},
-    {path="/boot.lua",      name="Boot loader"},
-    {path="/os.lua",        name="Operating system"},
-    {path="/system/startup",name="System startup"},
-    {path="/system/boot.lua",name="System boot loader"}
-}
+local VERSION = "3.0.0"
+local CONFIG = "/.cci_bios.cfg"
 
 local pages = {"MAIN", "ADVANCED", "BOOT", "SECURITY", "EXIT"}
-local page = 1
-local item = 1
-local bootItem = 1
+local currentPage = 1
+local cursor = 1
+local bootCursor = 1
 local savedBoot = nil
-local selectedBoot = nil
+local pendingBoot = nil
 
-local BG = colors.blue
-local PANEL = colors.lightGray
-local FG = colors.black
-local WHITE = colors.white
-local MUTED = colors.gray
-local SELECT = colors.gray
-local BLUE = colors.blue
-local GREEN = colors.lime
-local RED = colors.red
-local YELLOW = colors.yellow
+local C = {
+    blue = colors.blue,
+    lightBlue = colors.lightBlue,
+    gray = colors.gray,
+    lightGray = colors.lightGray,
+    white = colors.white,
+    black = colors.black,
+    yellow = colors.yellow,
+    red = colors.red,
+    lime = colors.lime
+}
 
-local function W()
+local bootCandidates = {
+    { path = "/startup", label = "CC:Tweaked startup" },
+    { path = "/boot.lua", label = "Boot loader" },
+    { path = "/os.lua", label = "Operating system" },
+    { path = "/system/startup", label = "System startup" },
+    { path = "/system/boot.lua", label = "System boot loader" }
+}
+
+local function size()
     return term.getSize()
 end
 
-local function H()
-    return select(2, term.getSize())
+local function fill(y, bg, fg)
+    local w = size()
+    term.setCursorPos(1, y)
+    term.setBackgroundColor(bg)
+    term.setTextColor(fg or C.black)
+    write(string.rep(" ", w))
 end
 
-local function cls(bg)
-    term.setBackgroundColor(bg or BG)
-    term.setTextColor(WHITE)
-    term.clear()
-    term.setCursorPos(1,1)
-end
+local function text(x, y, value, fg, bg)
+    local w = size()
 
-local function put(x,y,s,fg,bg)
-    term.setCursorPos(x,y)
+    x = math.max(1, math.min(x, w))
+    value = tostring(value or "")
+
+    if #value > w - x + 1 then
+        value = value:sub(1, math.max(0, w - x + 1))
+    end
+
+    term.setCursorPos(x, y)
     if bg then term.setBackgroundColor(bg) end
     if fg then term.setTextColor(fg) end
-    write(tostring(s or ""))
+    write(value)
 end
 
-local function blank(y,bg)
-    put(1,y,string.rep(" ",W()),FG,bg or BG)
-end
+local function fit(value, width)
+    value = tostring(value or "")
+    width = math.max(0, width or 0)
 
-local function fit(s,n)
-    s=tostring(s or "")
-    if n<=0 then return "" end
-    if #s>n then
-        if n<=3 then return s:sub(1,n) end
-        return s:sub(1,n-3).."..."
+    if #value > width then
+        if width <= 3 then
+            return value:sub(1, width)
+        end
+        return value:sub(1, width - 3) .. "..."
     end
-    return s..string.rep(" ",n-#s)
+
+    return value .. string.rep(" ", width - #value)
 end
 
-local function center(y,s,fg,bg)
-    s=tostring(s or "")
-    if #s>W() then s=fit(s,W()) end
-    put(math.max(1,math.floor((W()-#s)/2)+1),y,s,fg,bg)
+local function center(y, value, fg, bg)
+    local w = size()
+    value = tostring(value or "")
+
+    if #value > w then
+        value = fit(value, w)
+    end
+
+    local x = math.floor((w - #value) / 2) + 1
+    text(x, y, value, fg, bg)
 end
 
-local function box(x1,y1,x2,y2,bg,fg)
-    bg=bg or PANEL
-    fg=fg or MUTED
-    if x2-x1<2 or y2-y1<2 then return end
+local function panel(x1, y1, x2, y2, bg, fg)
+    local w, h = size()
 
-    for y=y1,y2 do
-        put(x1,y,"+"..string.rep("-",x2-x1-1).."+",fg,bg)
-        if y>y1 and y<y2 then
-            put(x1,y,"|",fg,bg)
-            put(x2,y,"|",fg,bg)
-            if x2-x1>1 then
-                put(x1+1,y,string.rep(" ",x2-x1-1),FG,bg)
-            end
+    x1 = math.max(1, math.min(x1, w))
+    x2 = math.max(1, math.min(x2, w))
+    y1 = math.max(1, math.min(y1, h))
+    y2 = math.max(1, math.min(y2, h))
+
+    if x2 <= x1 or y2 <= y1 then
+        return
+    end
+
+    bg = bg or C.lightGray
+    fg = fg or C.gray
+
+    for y = y1, y2 do
+        fill(y, bg, C.black)
+        if y == y1 or y == y2 then
+            text(x1, y, "+" .. string.rep("-", x2 - x1 - 1) .. "+", fg, bg)
+        else
+            text(x1, y, "|", fg, bg)
+            text(x2, y, "|", fg, bg)
         end
     end
+end
+
+local function clear(bg)
+    term.setBackgroundColor(bg)
+    term.setTextColor(C.white)
+    term.clear()
+    term.setCursorPos(1, 1)
 end
 
 local function header()
-    blank(1,BG)
-    put(2,1,"CCI BIOS SETUP UTILITY",WHITE,BG)
+    local w = size()
 
-    local v="v"..BIOS_VERSION
-    put(math.max(2,W()-#v),1,v,WHITE,BG)
+    fill(1, C.blue, C.white)
+    text(2, 1, "CCI BIOS SETUP UTILITY", C.white, C.blue)
 
-    blank(2,BLUE)
+    local v = "v" .. VERSION
+    text(math.max(2, w - #v), 1, v, C.white, C.blue)
 
-    local x=2
-    for i,name in ipairs(pages) do
-        local t=" "..name.." "
-        local bg=(i==page) and PANEL or BLUE
-        local fg=(i==page) and FG or WHITE
-        if x+#t-1<=W()-1 then
-            put(x,2,t,fg,bg)
-            x=x+#t+1
+    fill(2, C.lightBlue, C.black)
+
+    local x = 2
+
+    for i, name in ipairs(pages) do
+        local label = " " .. name .. " "
+        if x + #label <= w then
+            if i == currentPage then
+                text(x, 2, label, C.black, C.lightGray)
+            else
+                text(x, 2, label, C.white, C.lightBlue)
+            end
+            x = x + #label + 1
         end
-    end
-
-    blank(3,BG)
-
-    put(2,3,"CCI BIOS  |  CONFIGURATION",WHITE,BG)
-
-    local date=os.date("%Y-%m-%d %H:%M:%S")
-    if #date<W()-24 then
-        put(W()-#date-1,3,date,WHITE,BG)
     end
 end
 
 local function footer(status)
-    local h=H()
+    local w, h = size()
 
-    if h<6 then return end
-
-    blank(h-1,SELECT)
-    local hints="[←/→] Page  [↑/↓] Select  [Enter] Choose  [F10] Save"
-    put(2,h-1,fit(hints,W()-2),WHITE,SELECT)
-
-    blank(h,BLUE)
-
-    local s=status or "Ready"
-    put(2,h,"CCI BIOS  |  "..fit(s,math.max(0,W()-15)),WHITE,BLUE)
-
-    local mode="BIOS"
-    put(math.max(2,W()-#mode-1),h,mode,WHITE,BLUE)
-end
-
-local function title(name,description)
-    put(3,5,name,WHITE,BG)
-    put(3,6,fit(description,W()-6),WHITE,BG)
-end
-
-local function row(y,label,value)
-    local labelW=math.min(20,math.max(12,math.floor(W()*0.36)))
-    put(5,y,fit(label,labelW),MUTED,PANEL)
-    put(6+labelW,y,fit(value,W-(7+labelW)),FG,PANEL)
-end
-
-local function computerType()
-    if pocket then return "Pocket Computer" end
-    if turtle then
-        return term.isColor() and "Advanced Turtle" or "Turtle"
-    end
-    return term.isColor() and "Advanced Computer" or "Computer"
-end
-
-local function getBoots()
-    local out={}
-    for _,v in ipairs(bootCandidates) do
-        if fs.exists(v.path) and not fs.isDir(v.path) then
-            out[#out+1]=v
-        end
-    end
-    return out
-end
-
-local function loadCfg()
-    if not fs.exists(CFG) then return end
-
-    local f=fs.open(CFG,"r")
-    if not f then return end
-
-    local raw=f.readAll()
-    f.close()
-
-    local ok,t=pcall(textutils.unserialize,raw)
-    if ok and type(t)=="table" and type(t.boot)=="string" then
-        savedBoot=t.boot
-    end
-end
-
-local function saveCfg()
-    local path=selectedBoot
-    if not path then
-        local boots=getBoots()
-        if #boots>0 then path=boots[bootItem].path end
-    end
-
-    local f=fs.open(CFG,"w")
-    if not f then return false end
-
-    f.write(textutils.serialize({version=1,boot=path}))
-    f.close()
-    savedBoot=path
-    return true
-end
-
-local function syncBoot()
-    local boots=getBoots()
-
-    if #boots==0 then
-        bootItem=1
-        selectedBoot=nil
+    if h < 4 then
         return
     end
 
-    bootItem=1
+    fill(h - 1, C.gray, C.white)
+
+    local help = "[←][→] Page   [↑][↓] Select   [ENTER] Choose   [F10] Save"
+    text(2, h - 1, fit(help, w - 2), C.white, C.gray)
+
+    fill(h, C.blue, C.white)
+
+    local left = "CCI BIOS"
+    local right = status or "READY"
+
+    text(2, h, left, C.white, C.blue)
+    text(math.max(2, w - #right - 1), h, right, C.yellow, C.blue)
+end
+
+local function title(name, description)
+    local w, h = size()
+
+    text(3, 4, name, C.white, C.blue)
+    text(3, 5, fit(description, w - 6), C.lightBlue, C.blue)
+
+    if h >= 7 then
+        fill(6, C.blue, C.white)
+    end
+end
+
+local function field(x, y, label, value, labelWidth, valueWidth)
+    text(x, y, fit(label, labelWidth), C.gray, C.lightGray)
+    text(x + labelWidth + 1, y, fit(value, valueWidth), C.black, C.lightGray)
+end
+
+local function computerType()
+    if pocket then
+        return "Pocket Computer"
+    end
+
+    if turtle then
+        if term.isColor() then
+            return "Advanced Turtle"
+        end
+        return "Turtle"
+    end
+
+    if term.isColor() then
+        return "Advanced Computer"
+    end
+
+    return "Computer"
+end
+
+local function bootEntries()
+    local result = {}
+
+    for _, entry in ipairs(bootCandidates) do
+        if fs.exists(entry.path) and not fs.isDir(entry.path) then
+            result[#result + 1] = entry
+        end
+    end
+
+    return result
+end
+
+local function loadConfig()
+    savedBoot = nil
+
+    if not fs.exists(CONFIG) then
+        return
+    end
+
+    local h = fs.open(CONFIG, "r")
+    if not h then
+        return
+    end
+
+    local raw = h.readAll()
+    h.close()
+
+    local ok, data = pcall(textutils.unserialize, raw)
+
+    if ok and type(data) == "table" and type(data.boot) == "string" then
+        savedBoot = data.boot
+    end
+end
+
+local function saveConfig()
+    local entries = bootEntries()
+    local path = pendingBoot
+
+    if not path and #entries > 0 then
+        path = entries[bootCursor].path
+    end
+
+    if not path then
+        return false
+    end
+
+    local h = fs.open(CONFIG, "w")
+    if not h then
+        return false
+    end
+
+    h.write(textutils.serialize({
+        version = 1,
+        boot = path
+    }))
+
+    h.close()
+    savedBoot = path
+    return true
+end
+
+local function syncBootCursor()
+    local entries = bootEntries()
+
+    if #entries == 0 then
+        bootCursor = 1
+        pendingBoot = nil
+        return
+    end
+
+    bootCursor = 1
 
     if savedBoot then
-        for i,v in ipairs(boots) do
-            if v.path==savedBoot then
-                bootItem=i
+        for i, entry in ipairs(entries) do
+            if entry.path == savedBoot then
+                bootCursor = i
                 break
             end
         end
     end
 
-    selectedBoot=boots[bootItem].path
+    pendingBoot = entries[bootCursor].path
 end
 
 local function mainPage()
-    local h=H()
-    title("Main","System information and current boot configuration")
+    local w, h = size()
 
-    local split=math.floor(W()/2)
-    local left2=split-1
-    local right1=split+1
+    title("MAIN", "System overview and boot status")
 
-    if left2>8 then
-        box(3,8,left2,h-3,PANEL,MUTED)
-        put(5,8,"System",WHITE,SELECT)
-        row(10,"Computer",computerType())
-        row(12,"Computer ID",tostring(os.getComputerID()))
-        row(14,"Display",tostring(W()).." x "..tostring(h))
-        row(16,"Colors",term.isColor() and "Enabled" or "Disabled")
-        row(18,"Label",os.getComputerLabel() or "Not configured")
-    end
+    if w < 44 or h < 16 then
+        panel(3, 8, w - 3, h - 3)
 
-    box(right1,8,W()-3,h-3,PANEL,MUTED)
-    put(right1+2,8,"Boot",WHITE,SELECT)
+        text(5, 8, "SYSTEM", C.white, C.gray)
 
-    local boots=getBoots()
-    row(10,"Devices",tostring(#boots))
+        local y = 10
+        field(5, y, "Type", computerType(), 13, w - 20)
+        y = y + 2
+        field(5, y, "ID", os.getComputerID(), 13, w - 20)
+        y = y + 2
+        field(5, y, "Display", tostring(w) .. " x " .. tostring(h), 13, w - 20)
+        y = y + 2
+        field(5, y, "Label", os.getComputerLabel() or "Not configured", 13, w - 20)
 
-    local current
-    if #boots>0 then
-        bootItem=math.max(1,math.min(bootItem,#boots))
-        current=boots[bootItem]
-    end
-
-    row(12,"Selected",current and current.path or "None")
-    row(14,"Status",current and "Ready" or "No boot file")
-    row(16,"Saved",savedBoot or "Default")
-    row(18,"Boot mode","#"..tostring(bootItem).." / "..tostring(#boots))
-
-    footer("Main page")
-end
-
-local function advancedPage()
-    local h=H()
-    title("Advanced","Hardware and peripheral information")
-
-    box(3,8,W()-3,h-3,PANEL,MUTED)
-    put(5,8,"Hardware",WHITE,SELECT)
-
-    row(10,"Computer type",computerType())
-    row(12,"Terminal width",tostring(W()))
-    row(14,"Terminal height",tostring(h))
-    row(16,"Peripheral count",tostring(#peripheral.getNames()))
-    row(18,"CC:Tweaked",_HOST or "Unknown")
-
-    put(5,20,"Detected peripherals",WHITE,SELECT)
-
-    local y=22
-    for _,side in ipairs(peripheral.getNames()) do
-        if y>=h-4 then break end
-        local ptype=peripheral.getType(side) or "unknown"
-        put(7,y,fit(side,18),FG,PANEL)
-        put(27,y,fit(ptype,math.max(10,W()-29)),MUTED,PANEL)
-        y=y+1
-    end
-
-    if #peripheral.getNames()==0 then
-        put(7,y,"None detected.",MUTED,PANEL)
-    end
-
-    footer("Advanced information")
-end
-
-local function bootPage()
-    local h=H()
-    title("Boot","Boot priority order")
-
-    box(3,8,W()-3,h-3,PANEL,MUTED)
-    put(5,8,"Boot Priority",WHITE,SELECT)
-
-    local boots=getBoots()
-
-    if #boots==0 then
-        center(13,"NO BOOTABLE DEVICE FOUND",RED,PANEL)
-        center(15,"Create /startup or another supported boot file.",MUTED,PANEL)
-        footer("Boot menu")
+        footer("MAIN")
         return
     end
 
-    if bootItem>#boots then bootItem=#boots end
-    if bootItem<1 then bootItem=1 end
+    local mid = math.floor(w / 2)
 
-    local maxRows=math.max(1,h-13)
-    local first=math.max(1,math.min(bootItem,math.max(1,#boots-maxRows+1)))
-    local last=math.min(#boots,first+maxRows-1)
+    panel(3, 8, mid - 1, h - 3)
+    panel(mid + 1, 8, w - 3, h - 3)
 
-    local y=10
+    text(5, 8, "SYSTEM INFORMATION", C.white, C.gray)
+    text(mid + 3, 8, "BOOT STATUS", C.white, C.gray)
 
-    for i=first,last do
-        local v=boots[i]
-        local selected=(i==bootItem)
-        local bg=selected and BLUE or PANEL
-        local fg=selected and WHITE or FG
+    field(5, 10, "Computer", computerType(), 14, mid - 21)
+    field(5, 12, "Computer ID", os.getComputerID(), 14, mid - 21)
+    field(5, 14, "Display", tostring(w) .. " x " .. tostring(h), 14, mid - 21)
+    field(5, 16, "Label", os.getComputerLabel() or "Not configured", 14, mid - 21)
 
-        fillLine=y,bg,fg,5,W()-5
-        put(7,y,(selected and ">" or " ").." "..tostring(i),fg,bg)
-        put(13,y,fit(v.name,24),fg,bg)
+    local entries = bootEntries()
+    local selected = entries[bootCursor]
 
-        local px=39
-        if px<W()-4 then
-            put(px,y,fit(v.path,W()-px-5),fg,bg)
+    field(mid + 3, 10, "Boot entries", #entries, 14, w - mid - 21)
+    field(mid + 3, 12, "Mode", #entries > 0 and "NORMAL" or "NONE", 14, w - mid - 21)
+    field(mid + 3, 14, "Selected", selected and selected.path or "None", 14, w - mid - 21)
+    field(mid + 3, 16, "Saved", savedBoot or "Default", 14, w - mid - 21)
+
+    footer("MAIN")
+end
+
+local function advancedPage()
+    local w, h = size()
+
+    title("ADVANCED", "Hardware and peripheral information")
+    panel(3, 8, w - 3, h - 3)
+
+    text(5, 8, "HARDWARE", C.white, C.gray)
+
+    field(5, 10, "Computer type", computerType(), 18, w - 27)
+    field(5, 12, "Color support", term.isColor() and "AVAILABLE" or "UNAVAILABLE", 18, w - 27)
+    field(5, 14, "Terminal width", w, 18, w - 27)
+    field(5, 16, "Terminal height", h, 18, w - 27)
+    field(5, 18, "Peripherals", #peripheral.getNames(), 18, w - 27)
+
+    if h >= 22 then
+        text(5, 20, "PERIPHERALS", C.white, C.gray)
+
+        local y = 22
+        for _, side in ipairs(peripheral.getNames()) do
+            if y >= h - 3 then
+                break
+            end
+
+            text(7, y, fit(side, 18), C.black, C.lightGray)
+            text(27, y, fit(peripheral.getType(side) or "unknown", math.max(1, w - 28)), C.gray, C.lightGray)
+            y = y + 1
         end
 
-        y=y+2
+        if #peripheral.getNames() == 0 then
+            text(7, y, "None detected.", C.gray, C.lightGray)
+        end
     end
 
-    put(5,h-4,"Enter = select boot device",MUTED,PANEL)
-    footer("Boot menu")
+    footer("ADVANCED")
+end
+
+local function bootPage()
+    local w, h = size()
+    local entries = bootEntries()
+
+    title("BOOT", "Boot device priority")
+
+    panel(3, 8, w - 3, h - 3)
+    text(5, 8, "BOOT PRIORITY", C.white, C.gray)
+
+    if #entries == 0 then
+        center(12, "NO BOOTABLE DEVICE FOUND", C.red, C.lightGray)
+        center(14, "Create /startup, /boot.lua or /os.lua", C.gray, C.lightGray)
+        footer("BOOT")
+        return
+    end
+
+    if bootCursor < 1 then bootCursor = #entries end
+    if bootCursor > #entries then bootCursor = 1 end
+
+    local available = math.max(1, math.floor((h - 11) / 2))
+    local first = math.max(1, math.min(bootCursor, math.max(1, #entries - available + 1)))
+    local last = math.min(#entries, first + available - 1)
+
+    local y = 10
+
+    for i = first, last do
+        local entry = entries[i]
+        local selected = i == bootCursor
+        local bg = selected and C.blue or C.lightGray
+        local fg = selected and C.white or C.black
+
+        fill(y, bg, fg)
+        text(6, y, selected and ">" or " ", fg, bg)
+        text(8, y, fit(tostring(i), 3), fg, bg)
+        text(13, y, fit(entry.label, 22), fg, bg)
+
+        local pathX = 37
+        if pathX < w - 2 then
+            text(pathX, y, fit(entry.path, w - pathX - 2), C.lightBlue, bg)
+        end
+
+        y = y + 2
+    end
+
+    if h >= 15 then
+        text(5, h - 4, "ENTER = select this boot device", C.gray, C.lightGray)
+    end
+
+    footer("BOOT")
 end
 
 local function securityPage()
-    local h=H()
-    title("Security","Firmware security status")
+    local w, h = size()
 
-    box(3,8,W()-3,h-3,PANEL,MUTED)
-    put(5,8,"Security Status",WHITE,SELECT)
+    title("SECURITY", "Firmware security status")
+    panel(3, 8, w - 3, h - 3)
 
-    row(10,"Setup password","Not configured")
-    row(12,"Boot password","Not configured")
-    row(14,"Secure Boot","Unavailable")
-    row(16,"Firmware lock","Disabled")
-    row(18,"Configuration","Writable")
+    text(5, 8, "SECURITY STATUS", C.white, C.gray)
 
-    put(5,21,"This BIOS only reports features actually implemented.",MUTED,PANEL)
-    put(5,22,"No simulated security state is shown.",MUTED,PANEL)
+    field(5, 10, "Setup password", "NOT CONFIGURED", 19, w - 28)
+    field(5, 12, "Boot password", "NOT CONFIGURED", 19, w - 28)
+    field(5, 14, "Secure Boot", "NOT AVAILABLE", 19, w - 28)
+    field(5, 16, "Firmware lock", "DISABLED", 19, w - 28)
+    field(5, 18, "Configuration", "WRITABLE", 19, w - 28)
 
-    footer("Security information")
+    if h >= 21 then
+        text(5, h - 4, "This page reports only features implemented by this BIOS.", C.gray, C.lightGray)
+    end
+
+    footer("SECURITY")
 end
 
 local function exitPage()
-    local h=H()
-    local options={
+    local w, h = size()
+
+    local options = {
         "Save Changes & Exit",
         "Discard Changes & Exit",
         "Save Changes",
@@ -368,164 +453,179 @@ local function exitPage()
         "Shutdown Computer"
     }
 
-    title("Save & Exit","Apply configuration or leave BIOS Setup")
+    title("SAVE & EXIT", "Apply configuration or leave BIOS Setup")
+    panel(3, 8, w - 3, h - 3)
 
-    box(3,8,W()-3,h-3,PANEL,MUTED)
-    put(5,8,"Exit Options",WHITE,SELECT)
+    text(5, 8, "EXIT OPTIONS", C.white, C.gray)
 
-    local y=11
-    for i,v in ipairs(options) do
-        local selected=(i==item)
-        local bg=selected and BLUE or PANEL
-        local fg=selected and WHITE or FG
+    local y = 10
 
-        fillLine(y,bg,fg,6,W()-6)
-        put(8,y,(selected and ">" or " ").." "..v,fg,bg)
-        y=y+2
+    for i, option in ipairs(options) do
+        local selected = i == cursor
+        local bg = selected and C.blue or C.lightGray
+        local fg = selected and C.white or C.black
+
+        fill(y, bg, fg)
+        text(7, y, selected and ">" or " ", fg, bg)
+        text(9, y, fit(option, w - 12), fg, bg)
+        y = y + 2
     end
 
-    if selectedBoot then
-        put(5,h-4,"Boot device:",MUTED,PANEL)
-        put(18,h-4,fit(selectedBoot,W()-20),FG,PANEL)
-    end
-
-    footer("Exit menu")
+    footer("EXIT")
 end
 
 local function draw()
-    if H()<12 then
-        cls(BG)
-        center(5,"CCI BIOS",WHITE,BG)
-        center(7,"Terminal too small",YELLOW,BG)
-        center(8,"Use a larger Computer or Monitor.",WHITE,BG)
-        center(H()-1,"Press any key",MUTED,BG)
+    clear(C.blue)
+
+    local w, h = size()
+
+    if w < 30 or h < 12 then
+        center(math.max(2, math.floor(h / 2) - 1), "CCI BIOS", C.white, C.blue)
+        center(math.max(4, math.floor(h / 2) + 1), "Terminal too small", C.yellow, C.blue)
+        center(math.max(6, math.floor(h / 2) + 2), tostring(w) .. " x " .. tostring(h), C.white, C.blue)
         return
     end
 
-    if page==1 then
-        cls(BG)
-        header()
+    header()
+
+    if currentPage == 1 then
         mainPage()
-    elseif page==2 then
-        cls(BG)
-        header()
+    elseif currentPage == 2 then
         advancedPage()
-    elseif page==3 then
-        cls(BG)
-        header()
+    elseif currentPage == 3 then
         bootPage()
-    elseif page==4 then
-        cls(BG)
-        header()
+    elseif currentPage == 4 then
         securityPage()
     else
-        cls(BG)
-        header()
         exitPage()
     end
 end
 
-local function message(titleText,textText,color)
-    local w,h=W(),H()
-    local bw=math.min(48,w-6)
-    local bh=6
-    local x=math.floor((w-bw)/2)+1
-    local y=math.floor((h-bh)/2)
+local function message(titleText, body, color)
+    local w, h = size()
 
-    box(x,y,x+bw-1,y+bh,PANEL,MUTED)
-    fillLine(y,BLUE,WHITE,x,x+bw-1)
+    local boxW = math.min(46, w - 6)
+    local boxH = 6
 
-    put(x+2,y+2,fit(textText,bw-4),color or FG,PANEL)
-    put(x+2,y+4,fit("Press ENTER",bw-4),MUTED,PANEL)
+    if boxW < 18 or h < 10 then
+        clear(C.black)
+        center(math.max(2, math.floor(h / 2) - 1), titleText, color or C.white, C.black)
+        center(math.max(4, math.floor(h / 2) + 1), body, C.white, C.black)
+
+        while true do
+            local event, key = os.pullEvent("key")
+            if key == keys.enter or key == keys.escape then
+                return
+            end
+        end
+    end
+
+    local x = math.floor((w - boxW) / 2) + 1
+    local y = math.floor((h - boxH) / 2)
+
+    panel(x, y, x + boxW - 1, y + boxH)
+    fill(y, C.blue, C.white)
+    text(x + 2, y + 2, fit(body, boxW - 4), color or C.black, C.lightGray)
+    text(x + 2, y + 4, "Press ENTER", C.gray, C.lightGray)
 
     while true do
-        local e,k=os.pullEvent("key")
-        if k==keys.enter or k==keys.escape then return end
+        local event, key = os.pullEvent("key")
+        if key == keys.enter or key == keys.escape then
+            return
+        end
     end
 end
 
-local function setTab(dir)
-    page=page+dir
-    if page<1 then page=#pages end
-    if page>#pages then page=1 end
-    item=1
-end
+local function nextPage(delta)
+    currentPage = currentPage + delta
 
-local function bootSelected()
-    local boots=getBoots()
-    if #boots==0 then
-        message("Boot Error","No bootable device found.",RED)
-        return nil
+    if currentPage < 1 then
+        currentPage = #pages
+    elseif currentPage > #pages then
+        currentPage = 1
     end
 
-    bootItem=math.max(1,math.min(bootItem,#boots))
-    selectedBoot=boots[bootItem].path
-    return selectedBoot
+    cursor = 1
 end
 
 local function handleKey(key)
-    if key==keys.left then
-        setTab(-1)
+    if key == keys.left then
+        nextPage(-1)
         return nil
     end
 
-    if key==keys.right or key==keys.tab then
-        setTab(1)
+    if key == keys.right or key == keys.tab then
+        nextPage(1)
         return nil
     end
 
-    if key==keys.f10 then
-        saveCfg()
+    if key == keys.f10 then
+        saveConfig()
         return "BOOT"
     end
 
-    if page==3 then
-        local boots=getBoots()
+    if currentPage == 3 then
+        local entries = bootEntries()
 
-        if key==keys.up and #boots>0 then
-            bootItem=bootItem-1
-            if bootItem<1 then bootItem=#boots end
-            return nil
-        end
-
-        if key==keys.down and #boots>0 then
-            bootItem=bootItem+1
-            if bootItem>#boots then bootItem=1 end
-            return nil
-        end
-
-        if key==keys.enter then
-            if bootSelected() then
-                message("Boot Option",selectedBoot,GREEN)
+        if key == keys.up and #entries > 0 then
+            bootCursor = bootCursor - 1
+            if bootCursor < 1 then
+                bootCursor = #entries
             end
+            pendingBoot = entries[bootCursor].path
+            return nil
+        end
+
+        if key == keys.down and #entries > 0 then
+            bootCursor = bootCursor + 1
+            if bootCursor > #entries then
+                bootCursor = 1
+            end
+            pendingBoot = entries[bootCursor].path
+            return nil
+        end
+
+        if key == keys.enter and #entries > 0 then
+            pendingBoot = entries[bootCursor].path
+            message("BOOT DEVICE SELECTED", pendingBoot, C.lime)
             return nil
         end
 
         return nil
     end
 
-    if page==5 then
-        if key==keys.up then
-            item=item-1
-            if item<1 then item=5 end
-        elseif key==keys.down then
-            item=item+1
-            if item>5 then item=1 end
-        elseif key==keys.enter then
-            if item==1 then
-                saveCfg()
-                return "BOOT"
-            elseif item==2 then
-                return "BOOT"
-            elseif item==3 then
-                if saveCfg() then
-                    message("Saved","BIOS configuration saved.",GREEN)
-                else
-                    message("Save Error","Could not write BIOS configuration.",RED)
+    if currentPage == 5 then
+        if key == keys.up then
+            cursor = cursor - 1
+            if cursor < 1 then cursor = 5 end
+            return nil
+        end
+
+        if key == keys.down then
+            cursor = cursor + 1
+            if cursor > 5 then cursor = 1 end
+            return nil
+        end
+
+        if key == keys.enter then
+            if cursor == 1 then
+                if saveConfig() then
+                    return "BOOT"
                 end
-            elseif item==4 then
+                message("SAVE ERROR", "Unable to write BIOS configuration.", C.red)
+                return nil
+            elseif cursor == 2 then
+                return "BOOT"
+            elseif cursor == 3 then
+                if saveConfig() then
+                    message("SAVED", "BIOS configuration saved.", C.lime)
+                else
+                    message("SAVE ERROR", "Unable to write BIOS configuration.", C.red)
+                end
+                return nil
+            elseif cursor == 4 then
                 return "REBOOT"
-            elseif item==5 then
+            elseif cursor == 5 then
                 return "SHUTDOWN"
             end
         end
@@ -533,39 +633,51 @@ local function handleKey(key)
         return nil
     end
 
-    if page==1 and key==keys.enter then
-        return bootSelected() and "BOOT" or nil
+    if key == keys.enter then
+        if currentPage == 1 then
+            currentPage = 3
+            cursor = 1
+        elseif currentPage == 2 then
+            currentPage = 1
+            cursor = 1
+        elseif currentPage == 4 then
+            currentPage = 5
+            cursor = 1
+        end
     end
 
     return nil
 end
 
-local function waitSetup()
+local function setup()
     while true do
         draw()
 
-        local event,key=os.pullEvent("key")
+        local event, key = os.pullEvent("key")
 
-        if key==keys.escape then
-            page=5
-            item=2
+        if key == keys.escape then
+            currentPage = 5
+            cursor = 2
         else
-            local result=handleKey(key)
-            if result then return result end
+            local result = handleKey(key)
+
+            if result then
+                return result
+            end
         end
     end
 end
 
 local function post()
-    cls(colors.black)
+    local w, h = size()
 
-    local w,h=W(),H()
+    clear(C.black)
 
-    center(2,"CCI",WHITE,colors.black)
-    center(3,"COMPLEX COMPUTER INTERNATIONAL",colors.lightBlue,colors.black)
-    center(5,"BIOS INITIALIZATION",WHITE,colors.black)
+    center(2, "CCI", C.white, C.black)
+    center(3, "COMPLEX COMPUTER INTERNATIONAL", C.lightBlue, C.black)
+    center(5, "BIOS POWER-ON SELF TEST", C.white, C.black)
 
-    local checks={
+    local checks = {
         "Processor",
         "Memory",
         "Filesystem",
@@ -574,166 +686,166 @@ local function post()
         "Boot devices"
     }
 
-    local y=8
+    local y = math.max(7, math.floor(h / 3))
 
-    for i,name in ipairs(checks) do
-        put(4,y,name,WHITE,colors.black)
+    for i, name in ipairs(checks) do
+        if y < h - 4 then
+            text(4, y, fit(name, math.max(12, w - 16)), C.white, C.black)
 
-        local ok=true
-        if i==6 and #getBoots()==0 then ok=false end
+            local ok = true
+            if i == #checks and #bootEntries() == 0 then
+                ok = false
+            end
 
-        local s=ok and "[ OK ]" or "[NONE]"
-        local c=ok and GREEN or YELLOW
-
-        put(math.max(4,w-11),y,s,c,colors.black)
-        y=y+2
-        sleep(0.08)
+            text(math.max(4, w - 10), y, ok and "[ OK ]" or "[NONE]", ok and C.lime or C.yellow, C.black)
+            y = y + 1
+        end
+        sleep(0.05)
     end
 
-    local barW=math.min(36,math.max(10,w-12))
-    local bx=math.floor((w-barW)/2)+1
-
-    for p=0,100,10 do
-        local filled=math.floor(barW*p/100)
-        put(bx,h-4,"["..string.rep("#",filled)..string.rep(".",barW-filled).."]",colors.lightBlue,colors.black)
-        center(h-3,tostring(p).."%",MUTED,colors.black)
-        sleep(0.025)
+    if h >= 8 then
+        local hint = "Press [DEL] / [ESC] / ] for BIOS Setup"
+        center(h - 2, hint, C.gray, C.black)
     end
+
+    sleep(0.5)
 end
 
-local function boot(path)
-    cls(colors.black)
+local function executeBoot(path)
+    local w, h = size()
 
-    center(7,"CCI BIOS",WHITE,colors.black)
-    center(9,"Booting",colors.lightBlue,colors.black)
-    center(11,path,WHITE,colors.black)
+    clear(C.black)
 
-    local w,h=W(),H()
-    local bw=math.min(40,math.max(10,w-8))
-    local bx=math.floor((w-bw)/2)+1
+    center(6, "CCI BIOS", C.white, C.black)
+    center(8, "Starting boot device", C.lightBlue, C.black)
+    center(10, path, C.white, C.black)
 
-    for p=0,100,10 do
-        local f=math.floor(bw*p/100)
-        put(bx,14,string.rep("=",f)..string.rep("-",bw-f),colors.lightBlue,colors.black)
-        center(15,tostring(p).."%",MUTED,colors.black)
+    local barW = math.min(38, math.max(10, w - 8))
+    local x = math.floor((w - barW) / 2) + 1
+
+    for percent = 0, 100, 10 do
+        local filled = math.floor(barW * percent / 100)
+        text(x, 13, string.rep("=", filled) .. string.rep("-", barW - filled), C.lightBlue, C.black)
+        center(14, percent .. "%", C.gray, C.black)
         sleep(0.02)
     end
 
-    cls(colors.black)
+    clear(C.black)
 
-    local ok,err=pcall(function()
-        os.run({},path)
+    local ok, err = pcall(function()
+        os.run({}, path)
     end)
 
-    if not ok then
-        center(6,"BOOT FAILURE",RED,colors.black)
-        center(8,"The selected boot program returned an error.",WHITE,colors.black)
-
-        local msg=tostring(err)
-        local max=math.max(10,w-6)
-        local line=""
-        local y=11
-
-        for word in msg:gmatch("%S+") do
-            if line=="" then
-                line=word
-            elseif #line+#word+1<=max then
-                line=line.." "..word
-            else
-                put(3,y,fit(line,max),YELLOW,colors.black)
-                y=y+1
-                line=word
-                if y>=h-3 then break end
-            end
-        end
-
-        if line~="" and y<h-2 then
-            put(3,y,fit(line,max),YELLOW,colors.black)
-        end
-
-        center(h-1,"Press ENTER",MUTED,colors.black)
-
-        while true do
-            local e,k=os.pullEvent("key")
-            if k==keys.enter then break end
-        end
-
-        return false
+    if ok then
+        return true
     end
 
-    return true
+    local maxWidth = math.max(10, w - 6)
+    local messageText = tostring(err)
+    local line = ""
+    local y = 8
+
+    center(4, "BOOT FAILURE", C.red, C.black)
+
+    for word in messageText:gmatch("%S+") do
+        if line == "" then
+            line = word
+        elseif #line + #word + 1 <= maxWidth then
+            line = line .. " " .. word
+        else
+            text(3, y, fit(line, maxWidth), C.yellow, C.black)
+            y = y + 1
+            line = word
+
+            if y >= h - 3 then
+                break
+            end
+        end
+    end
+
+    if line ~= "" and y < h - 2 then
+        text(3, y, fit(line, maxWidth), C.yellow, C.black)
+    end
+
+    center(h - 1, "Press ENTER", C.gray, C.black)
+
+    while true do
+        local event, key = os.pullEvent("key")
+        if key == keys.enter then
+            return false
+        end
+    end
 end
 
+-- ============================================================
 -- Startup
-loadCfg()
-syncBoot()
+-- ============================================================
+
+loadConfig()
+syncBootCursor()
 
 post()
 
-local setupRequested=false
-local timer=os.startTimer(2.0)
+local enterSetup = false
+local timer = os.startTimer(1.8)
 
 while true do
-    local event,value=os.pullEvent()
+    local event, value = os.pullEvent()
 
-    if event=="key" then
-        if value==keys.delete or value==keys.escape then
-            setupRequested=true
+    if event == "key" then
+        if value == keys.delete or value == keys.escape then
+            enterSetup = true
             os.cancelTimer(timer)
             break
         end
-    elseif event=="char" and value=="]" then
-        setupRequested=true
+    elseif event == "char" and value == "]" then
+        enterSetup = true
         os.cancelTimer(timer)
         break
-    elseif event=="timer" and value==timer then
+    elseif event == "timer" and value == timer then
         break
     end
 end
 
-if setupRequested then
-    local result=waitSetup()
+syncBootCursor()
 
-    if result=="REBOOT" then
+if enterSetup then
+    local result = setup()
+
+    if result == "REBOOT" then
         os.reboot()
-    elseif result=="SHUTDOWN" then
+    elseif result == "SHUTDOWN" then
         os.shutdown()
-    elseif result=="BOOT" then
-        syncBoot()
-        local path=selectedBoot
+    elseif result == "BOOT" then
+        syncBootCursor()
 
-        if not path then
-            local boots=getBoots()
-            if #boots>0 then path=boots[bootItem].path end
-        end
+        local path = pendingBoot
 
         if path then
-            boot(path)
+            executeBoot(path)
         else
-            cls(colors.black)
-            center(9,"NO BOOTABLE DEVICE FOUND",RED,colors.black)
-            center(11,"Press ENTER",MUTED,colors.black)
+            center(10, "NO BOOTABLE DEVICE", C.red, C.black)
+            center(12, "Press ENTER", C.gray, C.black)
             while true do
-                local e,k=os.pullEvent("key")
-                if k==keys.enter then break end
+                local event, key = os.pullEvent("key")
+                if key == keys.enter then break end
             end
         end
     end
 else
-    syncBoot()
-    local path=selectedBoot
+    syncBootCursor()
 
-    if path then
-        boot(path)
+    if pendingBoot then
+        executeBoot(pendingBoot)
     else
-        local result=waitSetup()
-        if result=="REBOOT" then
+        local result = setup()
+
+        if result == "REBOOT" then
             os.reboot()
-        elseif result=="SHUTDOWN" then
+        elseif result == "SHUTDOWN" then
             os.shutdown()
-        elseif result=="BOOT" then
-            syncBoot()
-            if selectedBoot then boot(selectedBoot) end
+        elseif result == "BOOT" and pendingBoot then
+            executeBoot(pendingBoot)
         end
     end
 end
