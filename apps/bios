@@ -434,7 +434,7 @@ local function message(titleText,textText,color)
 
     box(x,y,x+bw-1,y+bh,PANEL,MUTED)
     fillLine(y,BLUE,WHITE,x,x+bw-1)
-    centerText=y
+
     put(x+2,y+2,fit(textText,bw-4),color or FG,PANEL)
     put(x+2,y+4,fit("Press ENTER",bw-4),MUTED,PANEL)
 
