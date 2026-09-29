@@ -46,6 +46,17 @@ local function fill(y, bg, fg)
     write(string.rep(" ", w))
 end
 
+local function fillRange(x1, y, x2, bg, fg)
+    local w = size()
+    x1 = math.max(1, math.min(x1, w))
+    x2 = math.max(1, math.min(x2, w))
+    if x2 < x1 then return end
+    term.setCursorPos(x1, y)
+    term.setBackgroundColor(bg)
+    term.setTextColor(fg or C.black)
+    write(string.rep(" ", x2 - x1 + 1))
+end
+
 local function text(x, y, value, fg, bg)
     local w = size()
 
@@ -104,7 +115,7 @@ local function panel(x1, y1, x2, y2, bg, fg)
     fg = fg or C.gray
 
     for y = y1, y2 do
-        fill(y, bg, C.black)
+        fillRange(x1, y, x2, bg, C.black)
         if y == y1 or y == y2 then
             text(x1, y, "+" .. string.rep("-", x2 - x1 - 1) .. "+", fg, bg)
         else
@@ -318,18 +329,16 @@ local function mainPage()
     text(5, 8, "SYSTEM INFORMATION", C.white, C.gray)
     text(mid + 3, 8, "BOOT STATUS", C.white, C.gray)
 
-    field(5, 10, "Computer", computerType(), 14, mid - 21)
-    field(5, 12, "Computer ID", os.getComputerID(), 14, mid - 21)
-    field(5, 14, "Display", tostring(w) .. " x " .. tostring(h), 14, mid - 21)
-    field(5, 16, "Label", os.getComputerLabel() or "Not configured", 14, mid - 21)
+    field(5, 10, "Computer", computerType(), 14, math.max(1, mid - 21))
+    field(5, 12, "Computer ID", os.getComputerID(), 14, math.max(1, mid - 21))
+    field(5, 14, "Display", tostring(w) .. " x " .. tostring(h), 14, math.max(1, mid - 21))
 
     local entries = bootEntries()
     local selected = entries[bootCursor]
 
-    field(mid + 3, 10, "Boot entries", #entries, 14, w - mid - 21)
-    field(mid + 3, 12, "Mode", #entries > 0 and "NORMAL" or "NONE", 14, w - mid - 21)
-    field(mid + 3, 14, "Selected", selected and selected.path or "None", 14, w - mid - 21)
-    field(mid + 3, 16, "Saved", savedBoot or "Default", 14, w - mid - 21)
+    field(mid + 3, 10, "Boot entries", #entries, 14, math.max(1, w - mid - 21))
+    field(mid + 3, 12, "Mode", #entries > 0 and "NORMAL" or "NONE", 14, math.max(1, w - mid - 21))
+    field(mid + 3, 14, "Selected", selected and selected.path or "None", 14, math.max(1, w - mid - 21))
 
     footer("MAIN")
 end
@@ -342,16 +351,15 @@ local function advancedPage()
 
     text(5, 8, "HARDWARE", C.white, C.gray)
 
-    field(5, 10, "Computer type", computerType(), 18, w - 27)
-    field(5, 12, "Color support", term.isColor() and "AVAILABLE" or "UNAVAILABLE", 18, w - 27)
-    field(5, 14, "Terminal width", w, 18, w - 27)
-    field(5, 16, "Terminal height", h, 18, w - 27)
-    field(5, 18, "Peripherals", #peripheral.getNames(), 18, w - 27)
+    field(5, 10, "Computer type", computerType(), 18, math.max(1, w - 27))
+    field(5, 12, "Color support", term.isColor() and "AVAILABLE" or "UNAVAILABLE", 18, math.max(1, w - 27))
+    field(5, 14, "Terminal width", w, 18, math.max(1, w - 27))
+    field(5, 16, "Terminal height", h, 18, math.max(1, w - 27))
 
     if h >= 22 then
         text(5, 20, "PERIPHERALS", C.white, C.gray)
 
-        local y = 22
+        local y = 21
         for _, side in ipairs(peripheral.getNames()) do
             if y >= h - 3 then
                 break
@@ -429,11 +437,10 @@ local function securityPage()
 
     text(5, 8, "SECURITY STATUS", C.white, C.gray)
 
-    field(5, 10, "Setup password", "NOT CONFIGURED", 19, w - 28)
-    field(5, 12, "Boot password", "NOT CONFIGURED", 19, w - 28)
-    field(5, 14, "Secure Boot", "NOT AVAILABLE", 19, w - 28)
-    field(5, 16, "Firmware lock", "DISABLED", 19, w - 28)
-    field(5, 18, "Configuration", "WRITABLE", 19, w - 28)
+    field(5, 10, "Setup password", "NOT CONFIGURED", 19, math.max(1, w - 28))
+    field(5, 12, "Boot password", "NOT CONFIGURED", 19, math.max(1, w - 28))
+    field(5, 14, "Secure Boot", "NOT AVAILABLE", 19, math.max(1, w - 28))
+    field(5, 16, "Firmware lock", "DISABLED", 19, math.max(1, w - 28))
 
     if h >= 21 then
         text(5, h - 4, "This page reports only features implemented by this BIOS.", C.gray, C.lightGray)
@@ -461,6 +468,9 @@ local function exitPage()
     local y = 10
 
     for i, option in ipairs(options) do
+        if y >= h - 3 then
+            break
+        end
         local selected = i == cursor
         local bg = selected and C.blue or C.lightGray
         local fg = selected and C.white or C.black
@@ -468,7 +478,7 @@ local function exitPage()
         fill(y, bg, fg)
         text(7, y, selected and ">" or " ", fg, bg)
         text(9, y, fit(option, w - 12), fg, bg)
-        y = y + 2
+        y = y + 1
     end
 
     footer("EXIT")
