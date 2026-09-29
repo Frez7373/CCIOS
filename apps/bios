@@ -1,1 +1,518 @@
+-- CCI BIOS
+-- Standalone BIOS-style boot manager for CC:Tweaked
+-- No external libraries or dependencies.
 
+local BIOS_VERSION = "1.0.1"
+
+local bootPaths = {
+    "/startup",
+    "/boot.lua",
+    "/os.lua",
+    "/system/startup",
+    "/system/boot.lua"
+}
+
+local selectedBoot = 1
+
+local function clear()
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.white)
+    term.clear()
+    term.setCursorPos(1, 1)
+end
+
+local function size()
+    return term.getSize()
+end
+
+local function center(y, text, color)
+    local w = size()
+    text = tostring(text or "")
+    local x = math.floor((w - #text) / 2) + 1
+    if x < 1 then x = 1 end
+    term.setCursorPos(x, y)
+    term.setTextColor(color or colors.white)
+    write(text)
+end
+
+local function horizontal(y, color)
+    local w = size()
+    term.setCursorPos(1, y)
+    term.setTextColor(color or colors.blue)
+    write(string.rep("-", w))
+end
+
+local function header(title)
+    local w, h = size()
+
+    term.setBackgroundColor(colors.blue)
+    term.setTextColor(colors.white)
+    term.setCursorPos(1, 1)
+    write(string.rep(" ", w))
+    term.setCursorPos(2, 1)
+    write("CCI BIOS")
+
+    local version = "v" .. BIOS_VERSION
+    term.setCursorPos(math.max(2, w - #version), 1)
+    write(version)
+
+    term.setBackgroundColor(colors.black)
+    term.setCursorPos(3, 3)
+    term.setTextColor(colors.white)
+    write(title)
+    horizontal(4, colors.blue)
+end
+
+local function footer(text)
+    local w, h = size()
+    term.setBackgroundColor(colors.blue)
+    term.setTextColor(colors.white)
+    term.setCursorPos(1, h)
+    write(string.rep(" ", w))
+    term.setCursorPos(2, h)
+    write(tostring(text):sub(1, math.max(0, w - 2)))
+    term.setBackgroundColor(colors.black)
+end
+
+local function computerType()
+    if pocket then return "Pocket Computer" end
+    if turtle then
+        if term.isColor() then return "Advanced Turtle" end
+        return "Turtle"
+    end
+    if term.isColor() then return "Advanced Computer" end
+    return "Computer"
+end
+
+local function availableBoots()
+    local found = {}
+
+    for _, path in ipairs(bootPaths) do
+        if fs.exists(path) and not fs.isDir(path) then
+            found[#found + 1] = path
+        end
+    end
+
+    return found
+end
+
+local function progress(y, percent)
+    local w = size()
+    local bar = math.min(38, math.max(12, w - 20))
+    local filled = math.floor(bar * percent / 100)
+    local x = math.floor((w - bar) / 2) + 1
+
+    term.setCursorPos(x, y)
+    term.setTextColor(colors.lightGray)
+    write("[")
+    term.setTextColor(colors.lime)
+    write(string.rep("#", filled))
+    term.setTextColor(colors.gray)
+    write(string.rep("-", bar - filled))
+    term.setTextColor(colors.lightGray)
+    write("] " .. tostring(percent) .. "%")
+end
+
+local function waitForAnyKey()
+    os.pullEvent("key")
+end
+
+local function post()
+    clear()
+
+    center(2, "CCI BIOS", colors.white)
+    center(3, "Computer Configuration & Boot System", colors.lightBlue)
+    center(4, "-----------------------------------------", colors.blue)
+
+    local checks = {
+        "Initializing processor",
+        "Checking memory",
+        "Checking filesystem",
+        "Detecting peripherals",
+        "Checking terminal",
+        "Searching boot devices"
+    }
+
+    local y = 7
+
+    for i, name in ipairs(checks) do
+        term.setCursorPos(3, y)
+        term.setTextColor(colors.white)
+        write(name)
+
+        local status = "OK"
+        if name == "Searching boot devices" and #availableBoots() == 0 then
+            status = "WARN"
+        end
+
+        local w = size()
+        local color = status == "OK" and colors.lime or colors.yellow
+        term.setTextColor(color)
+        term.setCursorPos(math.max(3, w - #status - 2), y)
+        write(status)
+
+        progress(size() >= 20 and size() - 3 or 1, math.floor(i / #checks * 100))
+        sleep(0.16)
+        y = y + 1
+    end
+
+    term.setTextColor(colors.lime)
+    term.setCursorPos(3, math.max(1, size() - 2))
+    write("POST COMPLETE")
+
+    center(size() - 1, "Press ] during startup to enter BIOS Setup", colors.gray)
+    sleep(0.6)
+end
+
+local function drawMain()
+    clear()
+    header("Main")
+
+    local w = size()
+    local info = {
+        {"Computer Type", computerType()},
+        {"Computer ID", tostring(os.getComputerID())},
+        {"Computer Label", os.getComputerLabel() or "Not configured"},
+        {"Display", tostring(w) .. " x " .. tostring(select(2, term.getSize()))},
+        {"Color Support", term.isColor() and "YES" or "NO"},
+        {"BIOS Version", BIOS_VERSION}
+    }
+
+    local y = 6
+    for _, item in ipairs(info) do
+        term.setCursorPos(5, y)
+        term.setTextColor(colors.lightGray)
+        write(item[1])
+
+        term.setCursorPos(27, y)
+        term.setTextColor(colors.white)
+        write(": " .. item[2])
+        y = y + 2
+    end
+
+    local boots = availableBoots()
+
+    term.setCursorPos(5, y + 1)
+    term.setTextColor(colors.lightBlue)
+    write("Selected Boot Device")
+
+    term.setCursorPos(5, y + 2)
+    if boots[1] then
+        if selectedBoot > #boots then selectedBoot = 1 end
+        term.setTextColor(colors.lime)
+        write(boots[selectedBoot])
+    else
+        term.setTextColor(colors.red)
+        write("No bootable file found")
+    end
+
+    footer("[B] Boot  [S] Setup  [D] Devices  [I] Info  [Q] Exit")
+end
+
+local function bootManager()
+    while true do
+        clear()
+        header("Boot Manager")
+
+        local boots = availableBoots()
+        local w, h = size()
+
+        if #boots == 0 then
+            center(8, "NO BOOTABLE DEVICE FOUND", colors.red)
+            center(10, "Supported paths:", colors.gray)
+
+            local y = 12
+            for _, path in ipairs(bootPaths) do
+                center(y, path, colors.lightBlue)
+                y = y + 1
+                if y >= h - 2 then break end
+            end
+
+            footer("[ESC] Back")
+        else
+            if selectedBoot > #boots then selectedBoot = 1 end
+
+            local y = 6
+            for i, path in ipairs(boots) do
+                if i == selectedBoot then
+                    term.setBackgroundColor(colors.blue)
+                    term.setTextColor(colors.white)
+                else
+                    term.setBackgroundColor(colors.black)
+                    term.setTextColor(colors.lightGray)
+                end
+
+                term.setCursorPos(4, y)
+                write(" " .. i .. ". " .. path)
+                term.setBackgroundColor(colors.black)
+                y = y + 2
+            end
+
+            footer("[UP/DOWN] Select  [ENTER] Boot  [ESC] Back")
+        end
+
+        local event, key = os.pullEvent("key")
+
+        if key == keys.up then
+            local count = #availableBoots()
+            if count > 0 then
+                selectedBoot = selectedBoot - 1
+                if selectedBoot < 1 then selectedBoot = count end
+            end
+        elseif key == keys.down then
+            local count = #availableBoots()
+            if count > 0 then
+                selectedBoot = selectedBoot + 1
+                if selectedBoot > count then selectedBoot = 1 end
+            end
+        elseif key == keys.enter then
+            if #boots > 0 then
+                return boots[selectedBoot]
+            end
+        elseif key == keys.escape then
+            return nil
+        end
+    end
+end
+
+local function devices()
+    clear()
+    header("Devices")
+
+    local list = peripheral.getNames()
+    local _, h = size()
+
+    if #list == 0 then
+        center(8, "NO EXTERNAL DEVICES DETECTED", colors.yellow)
+    else
+        local y = 6
+        for _, side in ipairs(list) do
+            local pType = peripheral.getType(side) or "Unknown"
+
+            term.setCursorPos(4, y)
+            term.setTextColor(colors.white)
+            write(side)
+
+            term.setCursorPos(25, y)
+            term.setTextColor(colors.lightBlue)
+            write(pType)
+
+            y = y + 2
+            if y >= h - 3 then break end
+        end
+    end
+
+    footer("[ENTER] Back")
+    waitForAnyKey()
+end
+
+local function systemInfo()
+    clear()
+    header("System Information")
+
+    local _, h = size()
+    local info = {
+        {"Computer", computerType()},
+        {"Computer ID", tostring(os.getComputerID())},
+        {"CC:Tweaked", _HOST or "Unknown"},
+        {"BIOS", BIOS_VERSION},
+        {"Architecture", "Lua"},
+        {"Display", tostring(select(1, term.getSize())) .. " x " .. tostring(select(2, term.getSize()))},
+        {"Color", term.isColor() and "Enabled" or "Disabled"},
+        {"Label", os.getComputerLabel() or "Not configured"}
+    }
+
+    local y = 6
+    for _, item in ipairs(info) do
+        term.setCursorPos(4, y)
+        term.setTextColor(colors.gray)
+        write(item[1])
+
+        term.setCursorPos(25, y)
+        term.setTextColor(colors.white)
+        write(item[2])
+
+        y = y + 2
+        if y >= h - 2 then break end
+    end
+
+    footer("[ENTER] Back")
+    waitForAnyKey()
+end
+
+local function setup()
+    local options = {
+        "Boot Manager",
+        "Device Manager",
+        "System Information",
+        "Restart Computer",
+        "Shutdown Computer"
+    }
+
+    local selected = 1
+
+    while true do
+        clear()
+        header("BIOS Setup")
+
+        local y = 7
+        for i, option in ipairs(options) do
+            if i == selected then
+                term.setBackgroundColor(colors.blue)
+                term.setTextColor(colors.white)
+            else
+                term.setBackgroundColor(colors.black)
+                term.setTextColor(colors.lightGray)
+            end
+
+            term.setCursorPos(6, y)
+            write(" > " .. option)
+            term.setBackgroundColor(colors.black)
+
+            y = y + 2
+        end
+
+        footer("[UP/DOWN] Select  [ENTER] Open  [ESC] Back")
+
+        local event, key = os.pullEvent("key")
+
+        if key == keys.up then
+            selected = selected - 1
+            if selected < 1 then selected = #options end
+
+        elseif key == keys.down then
+            selected = selected + 1
+            if selected > #options then selected = 1 end
+
+        elseif key == keys.enter then
+            if selected == 1 then
+                local path = bootManager()
+                if path then return path end
+
+            elseif selected == 2 then
+                devices()
+
+            elseif selected == 3 then
+                systemInfo()
+
+            elseif selected == 4 then
+                os.reboot()
+
+            elseif selected == 5 then
+                os.shutdown()
+            end
+
+        elseif key == keys.escape then
+            return nil
+        end
+    end
+end
+
+local function boot(path)
+    clear()
+
+    center(6, "CCI BIOS", colors.white)
+    center(8, "Loading operating system...", colors.lightBlue)
+    center(10, path, colors.lime)
+
+    progress(13, 100)
+    sleep(0.5)
+
+    clear()
+
+    local ok, err = pcall(function()
+        os.run({}, path)
+    end)
+
+    if not ok then
+        clear()
+
+        center(5, "BOOT ERROR", colors.red)
+
+        local w, h = size()
+        term.setCursorPos(3, 8)
+        term.setTextColor(colors.white)
+
+        local message = tostring(err)
+        local line = ""
+
+        for word in message:gmatch("%S+") do
+            if #line == 0 then
+                line = word
+            elseif #line + #word + 1 <= w - 6 then
+                line = line .. " " .. word
+            else
+                term.setCursorPos(3, select(2, term.getCursorPos()))
+                write(line)
+                line = word
+
+                local _, cy = term.getCursorPos()
+                if cy >= h - 2 then break end
+            end
+        end
+
+        if line ~= "" then
+            local _, cy = term.getCursorPos()
+            if cy < h - 1 then
+                term.setCursorPos(3, cy + 1)
+                write(line)
+            end
+        end
+
+        center(h, "Press any key to return", colors.gray)
+        waitForAnyKey()
+    end
+end
+
+local function waitForBIOS()
+    local timer = os.startTimer(2)
+
+    while true do
+        local event, value = os.pullEvent()
+
+        if event == "char" and value == "]" then
+            os.cancelTimer(timer)
+            return true
+        elseif event == "timer" and value == timer then
+            return false
+        end
+    end
+end
+
+post()
+
+clear()
+center(6, "CCI BIOS", colors.white)
+center(8, "Press ] to enter BIOS Setup", colors.lightBlue)
+center(10, "Starting boot process...", colors.gray)
+
+if waitForBIOS() then
+    local path = setup()
+    if path then
+        boot(path)
+    else
+        local boots = availableBoots()
+        if boots[1] then
+            boot(boots[selectedBoot] or boots[1])
+        end
+    end
+else
+    local boots = availableBoots()
+    if boots[1] then
+        boot(boots[selectedBoot] or boots[1])
+    else
+        clear()
+        center(7, "BOOT FAILURE", colors.red)
+        center(9, "No bootable operating system was found.", colors.white)
+        center(11, "Press ] to enter BIOS Setup.", colors.gray)
+
+        while true do
+            local event, value = os.pullEvent()
+            if event == "char" and value == "]" then
+                local path = setup()
+                if path then boot(path) end
+                break
+            end
+        end
+    end
+end
