@@ -1,518 +1,913 @@
--- CCI BIOS
--- Standalone BIOS-style boot manager for CC:Tweaked
+-- ============================================================
+-- CCI BIOS Setup Utility
+-- Standalone BIOS/UEFI-style interface for CC:Tweaked
 -- No external libraries or dependencies.
+-- ============================================================
 
-local BIOS_VERSION = "1.0.1"
+local BIOS_NAME = "CCI BIOS SETUP UTILITY"
+local BIOS_VERSION = "2.0.0"
+
+local CONFIG_FILE = "/.cci_bios.cfg"
 
 local bootPaths = {
-    "/startup",
-    "/boot.lua",
-    "/os.lua",
-    "/system/startup",
-    "/system/boot.lua"
+    { path = "/startup", label = "CC:Tweaked Startup" },
+    { path = "/boot.lua", label = "Boot Loader" },
+    { path = "/os.lua", label = "Operating System" },
+    { path = "/system/startup", label = "System Startup" },
+    { path = "/system/boot.lua", label = "System Boot Loader" }
 }
 
-local selectedBoot = 1
+local tabs = {
+    "Main",
+    "Advanced",
+    "Security",
+    "Boot",
+    "Save & Exit"
+}
 
-local function clear()
-    term.setBackgroundColor(colors.black)
-    term.setTextColor(colors.white)
+local activeTab = 1
+local cursor = 1
+local bootCursor = 1
+local pendingBoot = nil
+local savedBoot = nil
+local running = true
+
+local function getSize()
+    return term.getSize()
+end
+
+local function safeText(value)
+    return tostring(value or "")
+end
+
+local function clamp(value, low, high)
+    if value < low then return low end
+    if value > high then return high end
+    return value
+end
+
+local function clear(color)
+    term.setBackgroundColor(color or colors.lightGray)
+    term.setTextColor(colors.black)
     term.clear()
     term.setCursorPos(1, 1)
 end
 
-local function size()
-    return term.getSize()
+local function fillLine(y, bg, fg, x1, x2)
+    local w = getSize()
+    x1 = x1 or 1
+    x2 = x2 or w
+
+    if x1 > x2 then return end
+
+    term.setCursorPos(x1, y)
+    term.setBackgroundColor(bg)
+    term.setTextColor(fg)
+    write(string.rep(" ", x2 - x1 + 1))
 end
 
-local function center(y, text, color)
-    local w = size()
-    text = tostring(text or "")
-    local x = math.floor((w - #text) / 2) + 1
-    if x < 1 then x = 1 end
+local function writeAt(x, y, text, fg, bg)
     term.setCursorPos(x, y)
-    term.setTextColor(color or colors.white)
-    write(text)
+    if fg then term.setTextColor(fg) end
+    if bg then term.setBackgroundColor(bg) end
+    write(safeText(text))
 end
 
-local function horizontal(y, color)
-    local w = size()
-    term.setCursorPos(1, y)
-    term.setTextColor(color or colors.blue)
-    write(string.rep("-", w))
+local function fit(text, width)
+    text = safeText(text)
+
+    if width <= 0 then
+        return ""
+    end
+
+    if #text > width then
+        if width <= 3 then
+            return text:sub(1, width)
+        end
+        return text:sub(1, width - 3) .. "..."
+    end
+
+    return text .. string.rep(" ", width - #text)
 end
 
-local function header(title)
-    local w, h = size()
+local function drawBox(x1, y1, x2, y2, bg, fg)
+    if x2 <= x1 or y2 <= y1 then return end
 
-    term.setBackgroundColor(colors.blue)
-    term.setTextColor(colors.white)
-    term.setCursorPos(1, 1)
-    write(string.rep(" ", w))
-    term.setCursorPos(2, 1)
-    write("CCI BIOS")
+    for y = y1, y2 do
+        fillLine(y, bg, fg, x1, x2)
+    end
 
-    local version = "v" .. BIOS_VERSION
-    term.setCursorPos(math.max(2, w - #version), 1)
-    write(version)
+    writeAt(x1, y1, "+" .. string.rep("-", x2 - x1 - 1) .. "+", fg, bg)
+    writeAt(x1, y2, "+" .. string.rep("-", x2 - x1 - 1) .. "+", fg, bg)
 
-    term.setBackgroundColor(colors.black)
-    term.setCursorPos(3, 3)
-    term.setTextColor(colors.white)
-    write(title)
-    horizontal(4, colors.blue)
+    for y = y1 + 1, y2 - 1 do
+        writeAt(x1, y, "|", fg, bg)
+        writeAt(x2, y, "|", fg, bg)
+    end
 end
 
-local function footer(text)
-    local w, h = size()
-    term.setBackgroundColor(colors.blue)
-    term.setTextColor(colors.white)
-    term.setCursorPos(1, h)
-    write(string.rep(" ", w))
-    term.setCursorPos(2, h)
-    write(tostring(text):sub(1, math.max(0, w - 2)))
-    term.setBackgroundColor(colors.black)
+local function centerText(y, text, fg, bg)
+    local w = getSize()
+    text = safeText(text)
+
+    if #text > w then
+        text = fit(text, w)
+    end
+
+    local x = math.floor((w - #text) / 2) + 1
+    writeAt(x, y, text, fg, bg)
 end
 
 local function computerType()
-    if pocket then return "Pocket Computer" end
+    if pocket then
+        return "Pocket Computer"
+    end
+
     if turtle then
-        if term.isColor() then return "Advanced Turtle" end
+        if term.isColor() then
+            return "Advanced Turtle"
+        end
         return "Turtle"
     end
-    if term.isColor() then return "Advanced Computer" end
+
+    if term.isColor() then
+        return "Advanced Computer"
+    end
+
     return "Computer"
 end
 
-local function availableBoots()
-    local found = {}
+local function bootEntries()
+    local result = {}
 
-    for _, path in ipairs(bootPaths) do
-        if fs.exists(path) and not fs.isDir(path) then
-            found[#found + 1] = path
+    for _, entry in ipairs(bootPaths) do
+        if fs.exists(entry.path) and not fs.isDir(entry.path) then
+            result[#result + 1] = {
+                path = entry.path,
+                label = entry.label
+            }
         end
     end
 
-    return found
+    return result
 end
 
-local function progress(y, percent)
-    local w = size()
-    local bar = math.min(38, math.max(12, w - 20))
-    local filled = math.floor(bar * percent / 100)
-    local x = math.floor((w - bar) / 2) + 1
+local function currentBoot()
+    local entries = bootEntries()
 
-    term.setCursorPos(x, y)
-    term.setTextColor(colors.lightGray)
-    write("[")
-    term.setTextColor(colors.lime)
-    write(string.rep("#", filled))
-    term.setTextColor(colors.gray)
-    write(string.rep("-", bar - filled))
-    term.setTextColor(colors.lightGray)
-    write("] " .. tostring(percent) .. "%")
+    if #entries == 0 then
+        return nil
+    end
+
+    bootCursor = clamp(bootCursor, 1, #entries)
+
+    return entries[bootCursor]
 end
 
-local function waitForAnyKey()
-    os.pullEvent("key")
+local function loadConfig()
+    savedBoot = nil
+
+    if not fs.exists(CONFIG_FILE) then
+        return
+    end
+
+    local handle = fs.open(CONFIG_FILE, "r")
+    if not handle then
+        return
+    end
+
+    local data = handle.readAll()
+    handle.close()
+
+    local ok, cfg = pcall(textutils.unserialize, data)
+    if ok and type(cfg) == "table" then
+        if type(cfg.bootPath) == "string" then
+            savedBoot = cfg.bootPath
+        end
+    end
 end
 
-local function post()
-    clear()
+local function saveConfig()
+    local entry = currentBoot()
+    if not entry then
+        return false
+    end
 
-    center(2, "CCI BIOS", colors.white)
-    center(3, "Computer Configuration & Boot System", colors.lightBlue)
-    center(4, "-----------------------------------------", colors.blue)
+    local handle = fs.open(CONFIG_FILE, "w")
+    if not handle then
+        return false
+    end
 
-    local checks = {
-        "Initializing processor",
-        "Checking memory",
-        "Checking filesystem",
-        "Detecting peripherals",
-        "Checking terminal",
-        "Searching boot devices"
+    handle.write(textutils.serialize({
+        version = 1,
+        bootPath = entry.path
+    }))
+
+    handle.close()
+    savedBoot = entry.path
+    return true
+end
+
+local function selectSavedBoot()
+    local entries = bootEntries()
+
+    if savedBoot then
+        for i, entry in ipairs(entries) do
+            if entry.path == savedBoot then
+                bootCursor = i
+                return
+            end
+        end
+    end
+
+    bootCursor = 1
+end
+
+local function drawLogo()
+    local w, h = getSize()
+    clear(colors.black)
+
+    local logo = {
+        "  CCC        CCI ",
+        " C   C      C   I",
+        " C          C   I",
+        " C          C   I",
+        " C   C      C   I",
+        "  CCC        CCI "
     }
 
-    local y = 7
+    local startY = math.max(4, math.floor(h / 2) - 5)
+    local boxW = 24
+    local startX = math.floor((w - boxW) / 2) + 1
 
-    for i, name in ipairs(checks) do
-        term.setCursorPos(3, y)
-        term.setTextColor(colors.white)
-        write(name)
-
-        local status = "OK"
-        if name == "Searching boot devices" and #availableBoots() == 0 then
-            status = "WARN"
-        end
-
-        local w = size()
-        local color = status == "OK" and colors.lime or colors.yellow
-        term.setTextColor(color)
-        term.setCursorPos(math.max(3, w - #status - 2), y)
-        write(status)
-
-        progress(size() >= 20 and size() - 3 or 1, math.floor(i / #checks * 100))
-        sleep(0.16)
-        y = y + 1
+    for i, line in ipairs(logo) do
+        centerText(startY + i, line, colors.white, colors.blue)
     end
 
-    term.setTextColor(colors.lime)
-    term.setCursorPos(3, math.max(1, size() - 2))
-    write("POST COMPLETE")
+    centerText(startY + 8, BIOS_NAME, colors.white, colors.black)
+    centerText(startY + 9, "Revision " .. BIOS_VERSION, colors.lightGray, colors.black)
 
-    center(size() - 1, "Press ] during startup to enter BIOS Setup", colors.gray)
-    sleep(0.6)
+    local entries = bootEntries()
+    if #entries > 0 then
+        centerText(h - 3, "Press [DEL] or [ESC] during startup for BIOS Setup", colors.lightGray, colors.black)
+        centerText(h - 2, "Booting " .. entries[bootCursor].path .. " ...", colors.white, colors.black)
+    else
+        centerText(h - 3, "No bootable device detected", colors.red, colors.black)
+        centerText(h - 2, "Press [DEL] or [ESC] to enter BIOS Setup", colors.lightGray, colors.black)
+    end
+
+    sleep(0.8)
+end
+
+local function drawTopBar()
+    local w = getSize()
+
+    fillLine(1, colors.blue, colors.white)
+    writeAt(2, 1, BIOS_NAME, colors.white, colors.blue)
+
+    local version = "v" .. BIOS_VERSION
+    writeAt(w - #version, 1, version, colors.white, colors.blue)
+
+    fillLine(2, colors.lightBlue, colors.black)
+
+    local x = 2
+    for i, tab in ipairs(tabs) do
+        local text = " " .. tab .. " "
+        local bg = (i == activeTab) and colors.lightGray or colors.lightBlue
+        local fg = colors.black
+
+        writeAt(x, 2, text, fg, bg)
+        x = x + #text + 1
+
+        if x > w - 2 then
+            break
+        end
+    end
+end
+
+local function drawHeaderLine()
+    local w = getSize()
+
+    fillLine(4, colors.gray, colors.white)
+    writeAt(2, 4, "CCI  |  BIOS CONFIGURATION", colors.white, colors.gray)
+
+    local now = ""
+    if os.date then
+        now = os.date("%Y-%m-%d  %H:%M:%S")
+    end
+
+    if now ~= "" then
+        writeAt(math.max(2, w - #now), 4, now, colors.white, colors.gray)
+    end
+end
+
+local function drawBottomBar()
+    local w, h = getSize()
+
+    fillLine(h - 1, colors.gray, colors.white)
+
+    local hints = {
+        "[LEFT/RIGHT] Page",
+        "[UP/DOWN] Select",
+        "[ENTER] Enter",
+        "[F10] Save",
+        "[ESC] Exit"
+    }
+
+    local x = 2
+
+    for _, hint in ipairs(hints) do
+        if x + #hint <= w - 2 then
+            writeAt(x, h - 1, hint, colors.white, colors.gray)
+            x = x + #hint + 2
+        end
+    end
+
+    fillLine(h, colors.blue, colors.white)
+    writeAt(2, h, "CCI BIOS  |  Use arrow keys to navigate", colors.white, colors.blue)
+
+    local status = "READY"
+    if pendingBoot then
+        status = "CHANGED"
+    end
+
+    writeAt(w - #status - 1, h, status, colors.yellow, colors.blue)
+end
+
+local function drawTitle(title, subtitle)
+    writeAt(3, 6, title, colors.black, colors.lightGray)
+
+    if subtitle then
+        writeAt(3, 7, subtitle, colors.gray, colors.lightGray)
+    end
+end
+
+local function drawKeyValue(x, y, key, value, width)
+    width = width or 20
+
+    writeAt(x, y, fit(key, width), colors.gray, colors.lightGray)
+    writeAt(x + width + 2, y, fit(value, 24), colors.black, colors.lightGray)
 end
 
 local function drawMain()
-    clear()
-    header("Main")
+    local w, h = getSize()
+    clear(colors.lightGray)
+    drawTopBar()
+    drawHeaderLine()
+    drawTitle("Main", "System overview and boot information")
 
-    local w = size()
-    local info = {
-        {"Computer Type", computerType()},
-        {"Computer ID", tostring(os.getComputerID())},
-        {"Computer Label", os.getComputerLabel() or "Not configured"},
-        {"Display", tostring(w) .. " x " .. tostring(select(2, term.getSize()))},
-        {"Color Support", term.isColor() and "YES" or "NO"},
-        {"BIOS Version", BIOS_VERSION}
-    }
+    local mid = math.floor(w / 2)
 
-    local y = 6
-    for _, item in ipairs(info) do
-        term.setCursorPos(5, y)
-        term.setTextColor(colors.lightGray)
-        write(item[1])
+    drawBox(3, 9, mid - 2, h - 4, colors.lightGray, colors.gray)
+    drawBox(mid + 1, 9, w - 3, h - 4, colors.lightGray, colors.gray)
 
-        term.setCursorPos(27, y)
-        term.setTextColor(colors.white)
-        write(": " .. item[2])
-        y = y + 2
-    end
+    writeAt(5, 9, "System Information", colors.white, colors.gray)
 
-    local boots = availableBoots()
+    drawKeyValue(5, 11, "Computer Type", computerType(), 16)
+    drawKeyValue(5, 13, "Computer ID", tostring(os.getComputerID()), 16)
+    drawKeyValue(5, 15, "Label", os.getComputerLabel() or "Not configured", 16)
+    drawKeyValue(5, 17, "Display", tostring(w) .. " x " .. tostring(h), 16)
+    drawKeyValue(5, 19, "Colors", term.isColor() and "Enabled" or "Disabled", 16)
 
-    term.setCursorPos(5, y + 1)
-    term.setTextColor(colors.lightBlue)
-    write("Selected Boot Device")
+    local entries = bootEntries()
 
-    term.setCursorPos(5, y + 2)
-    if boots[1] then
-        if selectedBoot > #boots then selectedBoot = 1 end
-        term.setTextColor(colors.lime)
-        write(boots[selectedBoot])
+    writeAt(mid + 3, 9, "Boot Status", colors.white, colors.gray)
+
+    local current = currentBoot()
+
+    drawKeyValue(mid + 3, 11, "Boot entries", tostring(#entries), 15)
+    drawKeyValue(mid + 3, 13, "Boot mode", #entries > 0 and "Normal" or "No device", 15)
+
+    if current then
+        drawKeyValue(mid + 3, 16, "Selected", current.path, 15)
+        drawKeyValue(mid + 3, 18, "Description", current.label, 15)
     else
-        term.setTextColor(colors.red)
-        write("No bootable file found")
+        drawKeyValue(mid + 3, 16, "Selected", "None", 15)
+        drawKeyValue(mid + 3, 18, "Description", "No boot file found", 15)
     end
 
-    footer("[B] Boot  [S] Setup  [D] Devices  [I] Info  [Q] Exit")
+    writeAt(mid + 3, h - 7, "Tip:", colors.blue, colors.lightGray)
+    writeAt(mid + 8, h - 7, "Use the Boot tab to choose", colors.gray, colors.lightGray)
+    writeAt(mid + 3, h - 6, "the operating system to start.", colors.gray, colors.lightGray)
+
+    drawBottomBar()
 end
 
-local function bootManager()
-    while true do
-        clear()
-        header("Boot Manager")
+local function drawAdvanced()
+    local w, h = getSize()
+    clear(colors.lightGray)
+    drawTopBar()
+    drawHeaderLine()
+    drawTitle("Advanced", "Hardware and terminal diagnostics")
 
-        local boots = availableBoots()
-        local w, h = size()
+    drawBox(3, 9, w - 3, h - 4, colors.lightGray, colors.gray)
+    writeAt(5, 9, "Detected Hardware", colors.white, colors.gray)
 
-        if #boots == 0 then
-            center(8, "NO BOOTABLE DEVICE FOUND", colors.red)
-            center(10, "Supported paths:", colors.gray)
+    local devices = peripheral.getNames()
 
-            local y = 12
-            for _, path in ipairs(bootPaths) do
-                center(y, path, colors.lightBlue)
-                y = y + 1
-                if y >= h - 2 then break end
-            end
+    drawKeyValue(5, 11, "Peripheral count", tostring(#devices), 18)
+    drawKeyValue(5, 13, "Computer class", computerType(), 18)
+    drawKeyValue(5, 15, "Terminal width", tostring(select(1, term.getSize())), 18)
+    drawKeyValue(5, 17, "Terminal height", tostring(select(2, term.getSize())), 18)
+    drawKeyValue(5, 19, "Color support", term.isColor() and "Available" or "Unavailable", 18)
 
-            footer("[ESC] Back")
-        else
-            if selectedBoot > #boots then selectedBoot = 1 end
+    writeAt(5, 22, "Peripherals", colors.white, colors.gray)
 
-            local y = 6
-            for i, path in ipairs(boots) do
-                if i == selectedBoot then
-                    term.setBackgroundColor(colors.blue)
-                    term.setTextColor(colors.white)
-                else
-                    term.setBackgroundColor(colors.black)
-                    term.setTextColor(colors.lightGray)
-                end
+    local y = 24
+    for _, side in ipairs(devices) do
+        if y >= h - 5 then break end
 
-                term.setCursorPos(4, y)
-                write(" " .. i .. ". " .. path)
-                term.setBackgroundColor(colors.black)
-                y = y + 2
-            end
-
-            footer("[UP/DOWN] Select  [ENTER] Boot  [ESC] Back")
-        end
-
-        local event, key = os.pullEvent("key")
-
-        if key == keys.up then
-            local count = #availableBoots()
-            if count > 0 then
-                selectedBoot = selectedBoot - 1
-                if selectedBoot < 1 then selectedBoot = count end
-            end
-        elseif key == keys.down then
-            local count = #availableBoots()
-            if count > 0 then
-                selectedBoot = selectedBoot + 1
-                if selectedBoot > count then selectedBoot = 1 end
-            end
-        elseif key == keys.enter then
-            if #boots > 0 then
-                return boots[selectedBoot]
-            end
-        elseif key == keys.escape then
-            return nil
-        end
+        local pType = peripheral.getType(side) or "Unknown"
+        writeAt(7, y, fit(side, 18), colors.black, colors.lightGray)
+        writeAt(28, y, fit(pType, 22), colors.gray, colors.lightGray)
+        y = y + 1
     end
+
+    if #devices == 0 then
+        writeAt(7, y, "No external peripherals detected.", colors.gray, colors.lightGray)
+    end
+
+    drawBottomBar()
 end
 
-local function devices()
-    clear()
-    header("Devices")
+local function drawSecurity()
+    local w, h = getSize()
+    clear(colors.lightGray)
+    drawTopBar()
+    drawHeaderLine()
+    drawTitle("Security", "Firmware access status")
 
-    local list = peripheral.getNames()
-    local _, h = size()
+    drawBox(3, 9, w - 3, h - 4, colors.lightGray, colors.gray)
+    writeAt(5, 9, "Firmware Security", colors.white, colors.gray)
 
-    if #list == 0 then
-        center(8, "NO EXTERNAL DEVICES DETECTED", colors.yellow)
+    drawKeyValue(5, 12, "Setup password", "Not configured", 19)
+    drawKeyValue(5, 14, "Boot protection", "Not enforced", 19)
+    drawKeyValue(5, 16, "Secure Boot", "Unavailable", 19)
+    drawKeyValue(5, 18, "Firmware state", "Writable", 19)
+
+    writeAt(5, 21, "This screen reports real BIOS state only.", colors.gray, colors.lightGray)
+    writeAt(5, 22, "No fake security features are enabled.", colors.gray, colors.lightGray)
+
+    drawBottomBar()
+end
+
+local function drawBoot()
+    local w, h = getSize()
+    clear(colors.lightGray)
+    drawTopBar()
+    drawHeaderLine()
+    drawTitle("Boot", "Select the device used for normal startup")
+
+    local entries = bootEntries()
+    drawBox(3, 9, w - 3, h - 5, colors.lightGray, colors.gray)
+    writeAt(5, 9, "Boot Priority", colors.white, colors.gray)
+
+    if #entries == 0 then
+        centerText(15, "NO BOOTABLE DEVICE FOUND", colors.red, colors.lightGray)
+        centerText(17, "Expected files: /startup, /boot.lua, /os.lua", colors.gray, colors.lightGray)
     else
-        local y = 6
-        for _, side in ipairs(list) do
-            local pType = peripheral.getType(side) or "Unknown"
+        if bootCursor > #entries then bootCursor = 1 end
 
-            term.setCursorPos(4, y)
-            term.setTextColor(colors.white)
-            write(side)
+        local y = 12
+        for i, entry in ipairs(entries) do
+            local selected = i == bootCursor
+            local bg = selected and colors.blue or colors.lightGray
+            local fg = selected and colors.white or colors.black
 
-            term.setCursorPos(25, y)
-            term.setTextColor(colors.lightBlue)
-            write(pType)
+            fillLine(y, bg, fg, 5, w - 5)
+
+            local marker = selected and ">" or " "
+            writeAt(6, y, marker .. " " .. tostring(i), fg, bg)
+            writeAt(12, y, fit(entry.label, 24), fg, bg)
+            writeAt(38, y, fit(entry.path, w - 43), fg, bg)
 
             y = y + 2
-            if y >= h - 3 then break end
         end
+
+        writeAt(5, h - 7, "Default boot:", colors.gray, colors.lightGray)
+        writeAt(19, h - 7, currentBoot() and currentBoot().path or "None", colors.blue, colors.lightGray)
     end
 
-    footer("[ENTER] Back")
-    waitForAnyKey()
+    drawBottomBar()
 end
 
-local function systemInfo()
-    clear()
-    header("System Information")
+local function drawSaveExit()
+    local w, h = getSize()
+    clear(colors.lightGray)
+    drawTopBar()
+    drawHeaderLine()
+    drawTitle("Save & Exit", "Apply changes and leave firmware setup")
 
-    local _, h = size()
-    local info = {
-        {"Computer", computerType()},
-        {"Computer ID", tostring(os.getComputerID())},
-        {"CC:Tweaked", _HOST or "Unknown"},
-        {"BIOS", BIOS_VERSION},
-        {"Architecture", "Lua"},
-        {"Display", tostring(select(1, term.getSize())) .. " x " .. tostring(select(2, term.getSize()))},
-        {"Color", term.isColor() and "Enabled" or "Disabled"},
-        {"Label", os.getComputerLabel() or "Not configured"}
-    }
-
-    local y = 6
-    for _, item in ipairs(info) do
-        term.setCursorPos(4, y)
-        term.setTextColor(colors.gray)
-        write(item[1])
-
-        term.setCursorPos(25, y)
-        term.setTextColor(colors.white)
-        write(item[2])
-
-        y = y + 2
-        if y >= h - 2 then break end
-    end
-
-    footer("[ENTER] Back")
-    waitForAnyKey()
-end
-
-local function setup()
     local options = {
-        "Boot Manager",
-        "Device Manager",
-        "System Information",
-        "Restart Computer",
+        "Save Changes & Exit",
+        "Discard Changes & Exit",
+        "Save Changes",
+        "Reboot Computer",
         "Shutdown Computer"
     }
 
-    local selected = 1
+    drawBox(3, 9, w - 3, h - 5, colors.lightGray, colors.gray)
+    writeAt(5, 9, "Exit Options", colors.white, colors.gray)
 
-    while true do
-        clear()
-        header("BIOS Setup")
+    local y = 12
+    for i, option in ipairs(options) do
+        local selected = i == cursor
+        local bg = selected and colors.blue or colors.lightGray
+        local fg = selected and colors.white or colors.black
 
-        local y = 7
-        for i, option in ipairs(options) do
-            if i == selected then
-                term.setBackgroundColor(colors.blue)
-                term.setTextColor(colors.white)
-            else
-                term.setBackgroundColor(colors.black)
-                term.setTextColor(colors.lightGray)
-            end
+        fillLine(y, bg, fg, 6, w - 6)
+        writeAt(8, y, (selected and ">" or " ") .. " " .. option, fg, bg)
 
-            term.setCursorPos(6, y)
-            write(" > " .. option)
-            term.setBackgroundColor(colors.black)
+        y = y + 2
+    end
 
-            y = y + 2
+    if pendingBoot then
+        writeAt(5, h - 7, "Pending boot device:", colors.gray, colors.lightGray)
+        writeAt(25, h - 7, pendingBoot, colors.blue, colors.lightGray)
+    end
+
+    drawBottomBar()
+end
+
+local function drawCurrentPage()
+    if activeTab == 1 then
+        drawMain()
+    elseif activeTab == 2 then
+        drawAdvanced()
+    elseif activeTab == 3 then
+        drawSecurity()
+    elseif activeTab == 4 then
+        drawBoot()
+    else
+        drawSaveExit()
+    end
+end
+
+local function showMessage(title, message, messageColor)
+    local w, h = getSize()
+
+    local boxW = math.min(48, w - 6)
+    local boxH = 7
+    local x1 = math.floor((w - boxW) / 2) + 1
+    local y1 = math.floor((h - boxH) / 2) + 1
+
+    drawBox(x1, y1, x1 + boxW - 1, y1 + boxH, colors.lightGray, colors.gray)
+    fillLine(y1, colors.blue, colors.white, x1, x1 + boxW - 1)
+
+    centerText(y1, title, colors.white, colors.blue)
+
+    centerText(y1 + 2, message, messageColor or colors.black, colors.lightGray)
+    centerText(y1 + 4, "Press ENTER to continue", colors.gray, colors.lightGray)
+end
+
+local function selectSaveExit()
+    local options = 5
+    if cursor < 1 then cursor = options end
+    if cursor > options then cursor = 1 end
+end
+
+local function chooseSaveExit()
+    local result = cursor
+
+    if result == 1 then
+        saveConfig()
+        return "BOOT"
+    elseif result == 2 then
+        return "BOOT"
+    elseif result == 3 then
+        if saveConfig() then
+            pendingBoot = nil
+            showMessage("Settings saved", "Boot configuration has been saved.", colors.black)
+            waitForKey()
+            return nil
         end
 
-        footer("[UP/DOWN] Select  [ENTER] Open  [ESC] Back")
+        showMessage("Save failed", "Unable to write BIOS configuration.", colors.red)
+        waitForKey()
+        return nil
+    elseif result == 4 then
+        return "REBOOT"
+    elseif result == 5 then
+        return "SHUTDOWN"
+    end
 
+    return nil
+end
+
+function waitForKey()
+    while true do
         local event, key = os.pullEvent("key")
-
-        if key == keys.up then
-            selected = selected - 1
-            if selected < 1 then selected = #options end
-
-        elseif key == keys.down then
-            selected = selected + 1
-            if selected > #options then selected = 1 end
-
-        elseif key == keys.enter then
-            if selected == 1 then
-                local path = bootManager()
-                if path then return path end
-
-            elseif selected == 2 then
-                devices()
-
-            elseif selected == 3 then
-                systemInfo()
-
-            elseif selected == 4 then
-                os.reboot()
-
-            elseif selected == 5 then
-                os.shutdown()
-            end
-
-        elseif key == keys.escape then
-            return nil
+        if key == keys.enter or key == keys.escape then
+            return key
         end
     end
 end
 
+local function handleBoot()
+    local entries = bootEntries()
+    if #entries == 0 then
+        return nil
+    end
+
+    bootCursor = clamp(bootCursor, 1, #entries)
+    pendingBoot = entries[bootCursor].path
+    return pendingBoot
+end
+
+local function changeTab(direction)
+    activeTab = activeTab + direction
+
+    if activeTab < 1 then
+        activeTab = #tabs
+    elseif activeTab > #tabs then
+        activeTab = 1
+    end
+
+    cursor = 1
+end
+
+local function handleKey(key)
+    if key == keys.left then
+        changeTab(-1)
+        return nil
+    end
+
+    if key == keys.right or key == keys.tab then
+        changeTab(1)
+        return nil
+    end
+
+    if activeTab == 4 then
+        local entries = bootEntries()
+
+        if key == keys.up then
+            if #entries > 0 then
+                bootCursor = bootCursor - 1
+                if bootCursor < 1 then bootCursor = #entries end
+            end
+        elseif key == keys.down then
+            if #entries > 0 then
+                bootCursor = bootCursor + 1
+                if bootCursor > #entries then bootCursor = 1 end
+            end
+        elseif key == keys.enter then
+            if #entries > 0 then
+                pendingBoot = entries[bootCursor].path
+                showMessage("Boot option selected", pendingBoot, colors.black)
+                waitForKey()
+            end
+        end
+
+        return nil
+    end
+
+    if activeTab == 5 then
+        selectSaveExit()
+
+        if key == keys.up then
+            cursor = cursor - 1
+            if cursor < 1 then cursor = 5 end
+        elseif key == keys.down then
+            cursor = cursor + 1
+            if cursor > 5 then cursor = 1 end
+        elseif key == keys.enter then
+            return chooseSaveExit()
+        end
+
+        return nil
+    end
+
+    if key == keys.up or key == keys.down then
+        cursor = 1
+    elseif key == keys.enter then
+        if activeTab == 1 then
+            if cursor == 1 then
+                local bootPath = pendingBoot or (currentBoot() and currentBoot().path)
+                return bootPath or "BOOT_ERROR"
+            elseif cursor == 2 then
+                activeTab = 4
+                cursor = 1
+            elseif cursor == 3 then
+                activeTab = 2
+                cursor = 1
+            end
+        end
+    elseif key == keys.f10 then
+        saveConfig()
+        return "BOOT"
+    elseif key == keys.delete then
+        return "BOOT"
+    end
+
+    return nil
+end
+
+local function post()
+    clear(colors.black)
+
+    local w, h = getSize()
+
+    centerText(2, "CCI", colors.white, colors.blue)
+    centerText(3, "COMPLEX COMPUTER INTERNATIONAL", colors.lightBlue, colors.black)
+    centerText(4, BIOS_NAME, colors.white, colors.black)
+
+    drawBox(3, 7, w - 3, h - 6, colors.black, colors.gray)
+
+    local checks = {
+        "Processor initialization",
+        "Memory controller",
+        "Storage subsystem",
+        "Peripheral detection",
+        "Display controller",
+        "Boot device scan"
+    }
+
+    local y = 9
+
+    for i, name in ipairs(checks) do
+        writeAt(6, y, fit(name, math.max(20, w - 17)), colors.white, colors.black)
+
+        local status = "OK"
+        local color = colors.lime
+
+        if i == #checks and #bootEntries() == 0 then
+            status = "NOT FOUND"
+            color = colors.yellow
+        end
+
+        writeAt(w - #status - 5, y, status, color, colors.black)
+        y = y + 2
+        sleep(0.12)
+    end
+
+    local percent = 0
+
+    for i = 1, 20 do
+        percent = i * 5
+        local barWidth = math.min(42, math.max(10, w - 18))
+        local filled = math.floor(barWidth * percent / 100)
+        local x = math.floor((w - barWidth - 10) / 2)
+
+        writeAt(x, h - 4, "[", colors.gray, colors.black)
+        writeAt(x + 1, h - 4, string.rep("#", filled), colors.lightBlue, colors.black)
+        writeAt(x + 1 + filled, h - 4, string.rep("-", barWidth - filled), colors.gray, colors.black)
+        writeAt(x + barWidth + 1, h - 4, "] " .. tostring(percent) .. "%", colors.gray, colors.black)
+
+        sleep(0.02)
+    end
+
+    centerText(h - 2, "Press [DEL] or [ESC] to enter Setup", colors.lightGray, colors.black)
+
+    local timer = os.startTimer(1.8)
+
+    while true do
+        local event, value = os.pullEvent()
+
+        if event == "key" and (value == keys.delete or value == keys.escape) then
+            os.cancelTimer(timer)
+            return true
+        elseif event == "timer" and value == timer then
+            return false
+        elseif event == "char" and value == "]" then
+            os.cancelTimer(timer)
+            return true
+        end
+    end
+end
+
+local function runSetup()
+    cursor = 1
+    while running do
+        drawCurrentPage()
+
+        local event, key = os.pullEvent("key")
+
+        if key == keys.escape then
+            if activeTab == 5 then
+                activeTab = 1
+                cursor = 1
+            else
+                activeTab = 5
+                cursor = 2
+            end
+        else
+            local result = handleKey(key)
+
+            if result then
+                return result
+            end
+        end
+    end
+
+    return nil
+end
+
 local function boot(path)
-    clear()
+    clear(colors.black)
 
-    center(6, "CCI BIOS", colors.white)
-    center(8, "Loading operating system...", colors.lightBlue)
-    center(10, path, colors.lime)
+    local w, h = getSize()
 
-    progress(13, 100)
-    sleep(0.5)
+    centerText(6, "CCI BIOS", colors.white, colors.black)
+    centerText(8, "Starting boot device", colors.lightBlue, colors.black)
+    centerText(10, path, colors.white, colors.black)
 
-    clear()
+    local barWidth = math.min(40, math.max(10, w - 10))
+    for percent = 0, 100, 10 do
+        local filled = math.floor(barWidth * percent / 100)
+        local x = math.floor((w - barWidth) / 2)
+
+        writeAt(x, 13, string.rep("=", filled) .. string.rep("-", barWidth - filled), colors.lightBlue, colors.black)
+        centerText(14, tostring(percent) .. "%", colors.gray, colors.black)
+        sleep(0.04)
+    end
+
+    clear(colors.black)
 
     local ok, err = pcall(function()
         os.run({}, path)
     end)
 
     if not ok then
-        clear()
+        local _, h2 = getSize()
 
-        center(5, "BOOT ERROR", colors.red)
+        centerText(6, "BOOT FAILURE", colors.red, colors.black)
+        centerText(8, "The selected boot program returned an error.", colors.white, colors.black)
 
-        local w, h = size()
-        term.setCursorPos(3, 8)
-        term.setTextColor(colors.white)
+        local message = safeText(err)
+        local maxWidth = math.max(10, getSize() - 6)
 
-        local message = tostring(err)
         local line = ""
+        local y = 11
 
         for word in message:gmatch("%S+") do
             if #line == 0 then
                 line = word
-            elseif #line + #word + 1 <= w - 6 then
+            elseif #line + #word + 1 <= maxWidth then
                 line = line .. " " .. word
             else
-                term.setCursorPos(3, select(2, term.getCursorPos()))
-                write(line)
+                writeAt(3, y, fit(line, maxWidth), colors.yellow, colors.black)
+                y = y + 1
                 line = word
-
-                local _, cy = term.getCursorPos()
-                if cy >= h - 2 then break end
+                if y >= h2 - 3 then break end
             end
         end
 
-        if line ~= "" then
-            local _, cy = term.getCursorPos()
-            if cy < h - 1 then
-                term.setCursorPos(3, cy + 1)
-                write(line)
-            end
+        if y < h2 - 2 and line ~= "" then
+            writeAt(3, y, fit(line, maxWidth), colors.yellow, colors.black)
         end
 
-        center(h, "Press any key to return", colors.gray)
-        waitForAnyKey()
+        centerText(h2, "Press ENTER to return to BIOS", colors.lightGray, colors.black)
+        waitForKey()
+        return false
     end
+
+    return true
 end
 
-local function waitForBIOS()
-    local timer = os.startTimer(2)
+loadConfig()
+selectSavedBoot()
 
-    while true do
-        local event, value = os.pullEvent()
+local setupRequested = post()
 
-        if event == "char" and value == "]" then
-            os.cancelTimer(timer)
-            return true
-        elseif event == "timer" and value == timer then
-            return false
+if setupRequested then
+    local result = runSetup()
+
+    if result == "REBOOT" then
+        os.reboot()
+    elseif result == "SHUTDOWN" then
+        os.shutdown()
+    elseif result == "BOOT" then
+        local entries = bootEntries()
+        local path = pendingBoot
+
+        if not path and #entries > 0 then
+            path = entries[bootCursor].path
         end
-    end
-end
 
-post()
-
-clear()
-center(6, "CCI BIOS", colors.white)
-center(8, "Press ] to enter BIOS Setup", colors.lightBlue)
-center(10, "Starting boot process...", colors.gray)
-
-if waitForBIOS() then
-    local path = setup()
-    if path then
-        boot(path)
-    else
-        local boots = availableBoots()
-        if boots[1] then
-            boot(boots[selectedBoot] or boots[1])
+        if path then
+            boot(path)
+        else
+            clear(colors.black)
+            centerText(9, "NO BOOTABLE DEVICE FOUND", colors.red, colors.black)
+            centerText(11, "Press ENTER to return.", colors.gray, colors.black)
+            waitForKey()
         end
+    elseif result and result ~= "BOOT_ERROR" then
+        boot(result)
     end
 else
-    local boots = availableBoots()
-    if boots[1] then
-        boot(boots[selectedBoot] or boots[1])
-    else
-        clear()
-        center(7, "BOOT FAILURE", colors.red)
-        center(9, "No bootable operating system was found.", colors.white)
-        center(11, "Press ] to enter BIOS Setup.", colors.gray)
+    local entries = bootEntries()
 
-        while true do
-            local event, value = os.pullEvent()
-            if event == "char" and value == "]" then
-                local path = setup()
-                if path then boot(path) end
-                break
-            end
+    if #entries > 0 then
+        boot(entries[bootCursor].path)
+    else
+        local result = runSetup()
+        if result == "REBOOT" then
+            os.reboot()
+        elseif result == "SHUTDOWN" then
+            os.shutdown()
+        elseif result and result ~= "BOOT_ERROR" then
+            boot(result)
         end
     end
 end
